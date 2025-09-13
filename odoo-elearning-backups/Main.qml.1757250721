@@ -1,0 +1,80 @@
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Layouts 1.15
+
+ApplicationWindow {
+    id: root
+    visible: true
+    width: 400
+    height: 600
+    title: "Odoo eLearning"
+
+    ColumnLayout {
+        anchors.fill: parent
+        anchors.margins: 20
+        spacing: 10
+
+        TextField {
+            id: emailField
+            placeholderText: "Email"
+            Layout.fillWidth: true
+        }
+
+        TextField {
+            id: passwordField
+            placeholderText: "Password"
+            echoMode: TextInput.Password
+            Layout.fillWidth: true
+        }
+
+        RowLayout {
+            spacing: 10
+            Layout.fillWidth: true
+
+            Button {
+                text: "Login"
+                Layout.fillWidth: true
+                onClicked: backend.login(emailField.text, passwordField.text)
+            }
+
+            Button {
+                text: "Test Connection"
+                Layout.fillWidth: true
+                onClicked: backend.testConnection()
+            }
+        }
+
+        Label {
+            id: statusLabel
+            text: "Enter your Odoo credentials"
+            wrapMode: Text.Wrap
+            color: "red"
+            Layout.fillWidth: true
+        }
+
+        Label {
+            text: "Courses:"
+            font.bold: true
+            Layout.topMargin: 10
+        }
+
+        ListView {
+            id: courseList
+            model: courseModel
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+
+            delegate: Rectangle {
+                width: parent.width
+                height: 40
+                color: index % 2 === 0 ? "#f0f0f0" : "#ffffff"
+
+                Text {
+                    anchors.centerIn: parent
+                    text: display
+                    font.pointSize: 14
+                }
+            }
+        }
+    }
+}

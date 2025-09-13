@@ -1,0 +1,216 @@
+cat > qml/Main.qml <<'QML'
+import QtQuick 2.15
+import QtQuick.Controls 2.15
+import QtQuick.Layouts 1.15
+
+ApplicationWindow {
+    id: appwin
+    visible: true
+    width: 540
+    height: 800
+    title: "Odoo eLearning — Mobile Demo"
+
+    // top bar
+    header: ToolBar {
+        RowLayout {
+            anchors.fill: parent
+            spacing: 8
+            Label { text: "Odoo eLearning"; font.bold: true; Layout.alignment: Qt.AlignVCenter }
+            Item { Layout.fillWidth: true }
+            Button {
+                text: "Test"
+                onClicked: backend.testConnection()
+            }
+        }
+    }
+
+    StackView {
+        id: stack
+        anchors.fill: parent
+        initialItem: homePageComponent
+    }
+
+    Component {
+        id: homePageComponent
+        Page {
+            id: home
+            title: "Home"
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 12
+                spacing: 10
+
+                // Search bar
+                RowLayout {
+                    spacing: 8
+                    TextField {
+                        id: searchField
+                        placeholderText: "Search courses..."
+                        Layout.fillWidth: true
+                        onTextChanged: {
+                            // client-side filter applied in grid (see delegate visibility)
+                            courseGrid.forceLayout()
+                        }
+                    }
+                    Button {
+                        text: "Refresh"
+                        onClicked: backend.load_courses ? backend.load_courses() : backend.testConnection()
+                    }
+                }
+
+                Label {
+                    id: statusLabel
+                    text: "Please login to load courses"
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                    color: "grey"
+                }
+
+                // course grid
+                GridView {
+                    id: courseGrid
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    cellWidth: 240
+                    cellHeight: 120
+                    model: courseModel
+
+                    delegate: Rectangle {
+                        width: 220
+                        height: 110
+                        color: index % 2 === 0 ? "#ffffff" : "#fbfbfb"
+                        border.width: 1
+                        border.color: "#dddddd"
+                        radius: 8
+                        property string token: display
+                        visible: {
+                            if (searchField.text.length === 0) return true;
+                            return display.toLowerCase().indexOf(searchField.text.toLowerCase()) !== -1;
+                        }
+
+                        Column {
+                            anchors.fill: parent
+                            anchors.margins: 10
+                            spacing: 6
+                            Text { text: display.split("|")[1]; font.pixelSize: 16; elide: Text.ElideRight }
+                            Text { text: "Tap to open"; font.pixelSize: 12; color: "#666" }
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: {
+                                // push course page with parameter
+                                stack.push(coursePageComponent, {"courseToken": token})
+                            }
+                        }
+                    }
+                }
+            }
+
+            Component.onCompleted: {
+                // connect status updates
+                if (backend && backend.statusMessage) {
+                    backend.statusMessage.connect(function(msg){ statusLabel.text = msg })
+                }
+            }
+        }
+    }
+
+    Component {
+        id: coursePageComponent
+        Page {
+            id: coursePage
+            property string courseToken: ""
+            title: "Course"
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 12
+                spacing: 8
+
+                RowLayout {
+                    Button { text: "< Back"; onClicked: stack.pop() }
+                    Label { id: courseTitle; text: courseToken.length ? courseToken.split("|")[1] : "" ; Layout.fillWidth: true; font.pixelSize: 18 }
+                    Button { text: "Refresh"; onClicked: backend.openCourse(courseToken) }
+                }
+
+                Label { id: lessonsInfo; text: "Lessons will appear below" }
+
+                ListView {
+                    id: lessonsList
+                    model: lessonModel
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 280
+                    delegate: Rectangle {
+                        width: parent.width
+                        height: 56
+                        border.width: 1
+                        border.color: "#e0e0e0"
+                        color: index % 2 === 0 ? "#ffffff" : "#fafafa"
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.margins: 8
+                            Text { text: display.split("|")[1]; font.pixelSize: 14; Layout.fillWidth: true }
+                            Button {
+                                text: "Open"
+                                onClicked: {
+                                    backend.openLesson(display)
+                                    stack.push(lessonPageComponent, {"lessonToken": display})
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Component.onCompleted: {
+                if (courseToken.length) {
+                    backend.openCourse(courseToken)
+                }
+                // connect status/lesson count
+                backend.lessonsLoaded.connect(function(n) { lessonsInfo.text = n + " lessons"; })
+                backend.statusMessage.connect(function(msg){ /* update top status label in home? ignore here */ })
+            }
+        }
+    }
+
+    Component {
+        id: lessonPageComponent
+        Page {
+            id: lessonPage
+            property string lessonToken: ""
+            title: "Lesson"
+
+            ScrollView {
+                anchors.fill: parent
+                Column {
+                    width: parent.width
+                    spacing: 10
+                    padding: 12
+
+                    Button { text: "< Back"; onClicked: stack.pop() }
+
+                    Label { id: lessonTitle; text: lessonToken.length ? lessonToken.split("|")[1] : ""; font.pixelSize: 18 }
+
+                    Label { id: lessonDetail; text: "Loading..." ; wrapMode: Text.WordWrap }
+                    Label { id: quizLabel; text: "" ; wrapMode: Text.WordWrap; color: "darkgreen" }
+
+                    Component.onCompleted: {
+                        // connect signals for details & quiz
+                        backend.lessonDetailReady.connect(function(html){ lessonDetail.text = html })
+                        backend.quizReady.connect(function(q){ quizLabel.text = q })
+                        if (lessonToken.length) {
+                            // we already asked backend.openLesson when pressing Open button, but ensure fresh
+                            backend.openLesson(lessonToken)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+QML

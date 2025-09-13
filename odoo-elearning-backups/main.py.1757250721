@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+import sys
+import xmlrpc.client
+import socket
+from PySide6.QtCore import QObject, Slot, Signal, QAbstractListModel, Qt, QModelIndex
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtQml import QQmlApplicationEngine
+
+# ====== CONFIG ======
+ODOO_URL = "http://10.38.4.18:8069"
+DB = "odoo_db"
+# ====================
+
+class SimpleListModel(QAbstractListModel):
+    DisplayRole = Qt.UserRole + 1
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._items = []
+
+    def rowCount(self, parent=QModelIndex()):
+        return len(self._items)
+
+    def data(self, index, role=Qt.DisplayRole):
+        if index.isValid() and 0 <= index.row() < len(self._items):
+            if role == self.DisplayRole:
+                return self._items[index.row()]
+        return None
+
+    def roleNames(self):
+        return {self.DisplayRole: b"display"}
+
+    def setItems(self, items):
+        self.beginResetModel()
+        self._items = items
+        self.endResetModel()
+
+
+class Backend(QObject):
+    loginResult = Signal(str)
+    lessonDetailChanged = Signal(str)
+    quizLoaded = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.uid = None
+        self.password = None
+
+    @Slot(str, str)
+    def login(self, email, password):
+        try:
+            common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", allow_none=True)
+            self.uid = common.authenticate(DB, email, password, {})
+            if not self.uid:
+                self.loginResult.emit("❌ Invalid email or password")
+                return
+
+            self.password = password
+            self.loginResult.emit("✅ Login successful")
+            self.load_courses()
+
+        except Exception as e:
+            self.loginResult.emit(f"⚠️ Connection error: {e}")
+
+    def load_courses(self):
+        try:
+            models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object", allow_none=True)
+            courses = models.execute_kw(
+                DB, self.uid, self.password,
+                'slide.channel', 'search_read',
+                [[]],
+                {'fields': ['name'], 'limit': 20}
+            )
+            items = [c['name'] for c in courses]
+            courseModel.setItems(items)
+        except Exception as e:
+            self.loginResult.emit(f"⚠️ Failed to load courses: {e}")
+
+    @Slot(str)
+    def testConnection(self):
+        try:
+            socket.gethostbyname(ODOO_URL.replace("http://", "").split(":")[0])
+            self.loginResult.emit(f"Connection OK to {ODOO_URL}")
+        except Exception as e:
+            self.loginResult.emit(f"⚠️ Connection failed: {e}")
+
+
+if __name__ == "__main__":
+    app = QGuiApplication(sys.argv)
+    engine = QQmlApplicationEngine()
+
+    backend = Backend()
+    courseModel = SimpleListModel()
+
+    # Expose Python objects to QML
+    engine.rootContext().setContextProperty("backend", backend)
+    engine.rootContext().setContextProperty("courseModel", courseModel)
+
+    engine.load("qml/Main.qml")
+
+    if not engine.rootObjects():
+        sys.exit(-1)
+
+    sys.exit(app.exec())

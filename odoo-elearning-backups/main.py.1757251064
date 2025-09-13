@@ -1,0 +1,207 @@
+cat > main.py <<'PY'
+#!/usr/bin/env python3
+import sys, xmlrpc.client, socket, urllib.parse, traceback
+from PySide6.QtCore import (QObject, Slot, Signal, QAbstractListModel,
+                            Qt, QModelIndex, QByteArray)
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtQml import QQmlApplicationEngine
+
+# ====== CONFIGURE THIS ======
+# Use the IP you verified with Test Connection. Example: "http://10.0.2.2:8069"
+ODOO_URL = "http://10.38.4.18:8069"
+DB = "odoo_db"
+# ===========================
+
+def check_conn(url=ODOO_URL, timeout=3):
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+        sock = socket.create_connection((host, port), timeout=timeout)
+        sock.close()
+        return True
+    except Exception:
+        return False
+
+class GenericListModel(QAbstractListModel):
+    # single role 'display' holds a string like "id|name|extras"
+    DisplayRole = Qt.UserRole + 1
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._items = []
+
+    def rowCount(self, parent=QModelIndex()):
+        return len(self._items)
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid() or index.row() < 0 or index.row() >= len(self._items):
+            return None
+        if role == GenericListModel.DisplayRole:
+            return self._items[index.row()]
+        return None
+
+    def roleNames(self):
+        return {GenericListModel.DisplayRole: QByteArray(b"display")}
+
+    def clear(self):
+        self.beginResetModel()
+        self._items = []
+        self.endResetModel()
+
+    def setItems(self, items):
+        self.beginResetModel()
+        self._items = items
+        self.endResetModel()
+
+    def addItems(self, items):
+        if not items:
+            return
+        start = len(self._items)
+        end = start + len(items) - 1
+        self.beginInsertRows(QModelIndex(), start, end)
+        self._items.extend(items)
+        self.endInsertRows()
+
+class Backend(QObject):
+    statusMessage = Signal(str)       # HTML text for status
+    coursesLoaded = Signal(int)       # number of courses loaded
+    lessonsLoaded = Signal(int)       # number of lessons loaded
+    lessonDetailReady = Signal(str)   # HTML content for lesson detail
+    quizReady = Signal(str)           # HTML or text for quiz placeholder
+
+    def __init__(self, courseModel, lessonModel):
+        super().__init__()
+        self.courseModel = courseModel
+        self.lessonModel = lessonModel
+        self.uid = None
+        self.password = None
+
+    @Slot()
+    def testConnection(self):
+        ok = check_conn()
+        if ok:
+            self.statusMessage.emit(f"<font color='green'>Connection OK to {ODOO_URL}</font>")
+        else:
+            self.statusMessage.emit(f"<font color='red'>Cannot reach {ODOO_URL}</font>")
+
+    @Slot(str, str)
+    def login(self, email, password):
+        if not email or not password:
+            self.statusMessage.emit("<font color='red'>Enter email and password</font>")
+            return
+        if not check_conn():
+            self.statusMessage.emit(f"<font color='red'>Cannot reach {ODOO_URL}</font>")
+            return
+        try:
+            common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common", allow_none=True)
+            uid = common.authenticate(DB, email, password, {})
+            if not uid:
+                self.statusMessage.emit("<font color='red'>Login failed — check credentials & DB</font>")
+                return
+            self.uid = uid
+            self.password = password
+            self.statusMessage.emit("<font color='green'>Login successful</font>")
+            self.load_courses()
+        except Exception as e:
+            self.statusMessage.emit(f"<font color='red'>Connection error: {e}</font>")
+            traceback.print_exc()
+
+    def load_courses(self):
+        if not self.uid:
+            self.statusMessage.emit("<font color='red'>Not logged in</font>")
+            return
+        try:
+            models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object", allow_none=True)
+            recs = models.execute_kw(DB, self.uid, self.password,
+                                    'slide.channel', 'search_read',
+                                    [[]], {'fields': ['id', 'name'], 'limit': 200})
+            # store as "id|name"
+            items = [f"{r.get('id')}|{r.get('name')}" for r in recs]
+            self.courseModel.setItems(items)
+            self.coursesLoaded.emit(len(items))
+            self.statusMessage.emit(f"<font color='green'>Loaded {len(items)} courses</font>")
+        except Exception as e:
+            self.statusMessage.emit(f"<font color='red'>Failed to load courses: {e}</font>")
+            traceback.print_exc()
+
+    @Slot(str)
+    def openCourse(self, courseToken):
+        # courseToken format: "id|name"
+        try:
+            cid, cname = courseToken.split("|",1)
+            cid = int(cid)
+            # fetch slides for the channel id
+            models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object", allow_none=True)
+            recs = models.execute_kw(DB, self.uid, self.password,
+                                    'slide.slide', 'search_read',
+                                    [[['channel_id', '=', cid]]],
+                                    {'fields': ['id','name','slide_type','description','url'], 'limit': 500})
+            lessons = [f"{r.get('id')}|{r.get('name')}|{r.get('slide_type') or ''}" for r in recs]
+            self.lessonModel.setItems(lessons)
+            self.lessonsLoaded.emit(len(lessons))
+            self.statusMessage.emit(f"<font color='blue'>Loaded {len(lessons)} lessons for {cname}</font>")
+        except Exception as e:
+            self.statusMessage.emit(f"<font color='red'>Error opening course: {e}</font>")
+            traceback.print_exc()
+
+    @Slot(str)
+    def openLesson(self, lessonToken):
+        # lessonToken: "id|name|type"
+        try:
+            parts = lessonToken.split("|",2)
+            lid = int(parts[0])
+            ltype = parts[2] if len(parts)>2 else ''
+            models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object", allow_none=True)
+            recs = models.execute_kw(DB, self.uid, self.password,
+                                    'slide.slide', 'search_read',
+                                    [[['id','=',lid]]],
+                                    {'fields':['id','name','description','slide_type','url'], 'limit':1})
+            if recs:
+                r = recs[0]
+                detail = f"<b>{r.get('name')}</b><br>"
+                desc = r.get('description') or ''
+                if desc:
+                    detail += f"{desc}<br>"
+                if r.get('slide_type')=='video' and r.get('url'):
+                    detail += f"<a href='{r.get('url')}'>Open video</a><br>"
+                self.lessonDetailReady.emit(detail)
+                if ltype == 'quiz':
+                    # fetch quiz questions (simple placeholder)
+                    qrecs = models.execute_kw(DB, self.uid, self.password,
+                                              'slide.question', 'search_read',
+                                              [[['slide_id','=',lid]]],
+                                              {'fields':['question','answer_ids'], 'limit':20})
+                    if qrecs:
+                        quiz_html = "<b>Quiz Questions</b><br>"
+                        for q in qrecs:
+                            quiz_html += f"Q: {q.get('question')}<br>"
+                        self.quizReady.emit(quiz_html)
+                    else:
+                        self.quizReady.emit("<i>No quiz questions found</i>")
+                else:
+                    self.quizReady.emit("")  # clear quiz view
+            else:
+                self.lessonDetailReady.emit("<i>No lesson details</i>")
+        except Exception as e:
+            self.lessonDetailReady.emit(f"<font color='red'>Error: {e}</font>")
+            traceback.print_exc()
+
+if __name__ == "__main__":
+    app = QGuiApplication(sys.argv)
+    engine = QQmlApplicationEngine()
+
+    courseModel = GenericListModel()
+    lessonModel = GenericListModel()
+    backend = Backend(courseModel, lessonModel)
+
+    engine.rootContext().setContextProperty("backend", backend)
+    engine.rootContext().setContextProperty("courseModel", courseModel)
+    engine.rootContext().setContextProperty("lessonModel", lessonModel)
+
+    engine.load("qml/Main.qml")
+    if not engine.rootObjects():
+        print("Failed to load QML")
+        sys.exit(-1)
+    sys.exit(app.exec())
+PY
